@@ -36,6 +36,11 @@ const record = z.strictObject({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
 });
 
+/**
+ * Returns a detached, structurally valid record with a verified envelope hash.
+ * Throws VALIDATION for malformed or unpersistable data; does not replay rules
+ * or verify the record's position within an account's history.
+ */
 export function parseRecord(value: unknown): JournalRecord {
   try {
     const parsed = record.parse(clone(value));
@@ -66,6 +71,10 @@ export function parseRecord(value: unknown): JournalRecord {
   }
 }
 
+/**
+ * Returns a detached projection with valid balance names and exact amounts.
+ * Throws VALIDATION for malformed data; does not prove agreement with history.
+ */
 export function parseVector(value: unknown): BalanceVector {
   try {
     return vector.parse(clone(value));
@@ -77,6 +86,11 @@ export function parseVector(value: unknown): BalanceVector {
   }
 }
 
+/**
+ * Returns new totals by subtracting debits and adding credits in entry order.
+ * Throws VALIDATION for invalid entries or a balance's commodity changing;
+ * negative totals remain valid because limits belong to ledger rules.
+ */
 export function foldEntries(
   balances: BalanceVector,
   entries: readonly StoredEntry[],
@@ -118,6 +132,13 @@ export function foldEntries(
   return result;
 }
 
+/**
+ * Validates and detaches a new append against the current head and entry fold.
+ * Adapters must first resolve idempotency, then call this under their atomic
+ * revision guard; this helper neither acquires locks nor persists anything.
+ * Allows new zero balances, but rejects missing projections with
+ * PROJECTION_MISSING, stale heads with CONCURRENCY, and bad commits with VALIDATION.
+ */
 export function validateCommit(
   accountId: AccountId,
   expectedRevision: bigint,
@@ -166,6 +187,11 @@ export function validateCommit(
   return { record: candidate, balances: proposed };
 }
 
+/**
+ * Throws IDEMPOTENCY_CONFLICT when a previously found event has different content.
+ * Callers must look up the global event ID and compute the incoming fingerprint;
+ * this comparison deliberately ignores revision and derived results.
+ */
 export function assertIdempotent(
   existing: JournalRecord,
   expectedFingerprint: string,

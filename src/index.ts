@@ -1,3 +1,7 @@
+/**
+ * @fileoverview Public accounting API; import storage adapters from their explicit
+ * package subpaths and compose them with createLedger.
+ */
 export type { LedgerErrorCode } from "./errors.ts";
 export { LedgerError } from "./errors.ts";
 export type {

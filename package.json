@@ -1,7 +1,15 @@
 {
-  "name": "typed-operational-ledger",
+  "name": "@tylerchambers/tally",
   "version": "0.1.0",
   "description": "An embeddable, typed double-entry operational ledger",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tylerchambers/tally.git"
+  },
+  "homepage": "https://github.com/tylerchambers/tally#readme",
+  "bugs": {
+    "url": "https://github.com/tylerchambers/tally/issues"
+  },
   "type": "module",
   "files": [
     "dist"

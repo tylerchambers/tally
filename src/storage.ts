@@ -1,4 +1,5 @@
-/** Canonical boundary utilities for application-supplied LedgerStore adapters. */
+// Adapter authors share the ledger's codec and validation instead of defining
+// competing persistence representations. Contracts live at their declarations.
 export { clone, decode, encode, fingerprint } from "./serialization.ts";
 export {
   assertIdempotent,

@@ -29,33 +29,77 @@ import type {
   StoredEnvelope,
 } from "./store.ts";
 
+/**
+ * Couples a catalog-typed event with its account and store-wide idempotency key.
+ * Effective time and metadata are part of the request's identity.
+ */
 export type EventEnvelope<E extends EventCatalog> = Omit<
   StoredEnvelope,
   "event"
 > &
   Readonly<{ event: EventsOf<E> }>;
+/**
+ * Represents a committed event with its durable entries and account revision.
+ * Payloads retain schema-input form rather than rule-output form.
+ */
 export type LedgerRecord<E extends EventCatalog> = Omit<
   JournalRecord,
   "event"
 > &
   Readonly<{ event: EventsOf<E> }>;
+/**
+ * Accepts a candidate vector only by returning true; false or a thrown error
+ * rejects it with INVARIANT. Must be synchronous and pure for retries and verify.
+ */
 export type Invariant<B extends BalanceDefinitions> = (
   balances: Balances<B>,
 ) => boolean;
+/**
+ * Supplies catalogs, persistence, and policy explicitly at the composition root.
+ */
 export type LedgerOptions<
   B extends BalanceDefinitions,
   E extends EventCatalog,
 > = Readonly<{
+  /**
+   * Defines the exact buckets and commodities shared by every account.
+   */
   balances: B;
+  /**
+   * Supplies constructors and rules, including every version retained in history.
+   */
   events: E;
+  /**
+   * Owns atomic persistence and the global event-ID namespace; lifecycle stays
+   * with the caller, not the ledger.
+   */
   store: LedgerStore;
+  /**
+   * Supplies recordedAt for each new commit attempt; defaults to the system clock.
+   * Effective time is caller-supplied and does not determine revision order.
+   */
   clock?: () => Date;
+  /**
+   * Bounds record and rebuild attempts, including the first; 1–1000, default 8.
+   * Only optimistic conflicts retry automatically, not arbitrary store failures.
+   */
   maxAttempts?: number;
+  /**
+   * Checks the complete post-event vector and each replayed vector during verify.
+   * Historical reads and rebuild do not run these callbacks.
+   */
   invariants?: readonly Invariant<B>[];
 }>;
+/**
+ * Selects an inclusive account revision, with zero representing all-zero balances.
+ */
 export type HistoricalOptions = Readonly<{
   at: Readonly<{ revision: bigint }>;
 }>;
+/**
+ * Reports the captured revision whose rules, journal, and projection agree;
+ * later concurrent commits are outside this verification result.
+ */
 export type Verification<B extends BalanceDefinitions> = Readonly<{
   revision: bigint;
   balances: Balances<B>;
@@ -78,6 +122,11 @@ const envelopeSchema = z.strictObject({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
+/**
+ * Coordinates typed accounting policy with an explicitly supplied store.
+ * Reuse with stable catalogs and pure rules; keep historical versions available.
+ * The caller owns store startup and disposal. Use createLedger for defaults.
+ */
 export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
   readonly #balances: B;
   readonly #events: E;
@@ -87,6 +136,10 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
   readonly #invariants: readonly Invariant<B>[];
   readonly #zero: Balances<B>;
 
+  /**
+   * Captures configuration with an explicit clock and bounded attempt count.
+   * Validates the balance catalog without reading or initializing storage.
+   */
   constructor(options: Dependencies<B, E>) {
     this.#balances = clone(options.balances);
     defineBalances(this.#balances);
@@ -115,6 +168,11 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
     this.#zero = parseBalances(this.#balances, zero);
   }
 
+  /**
+   * Returns the current projection, or folds stored entries through a revision.
+   * Current reads require a projection; historical reads scan journal history
+   * without rerunning rules and reject revisions beyond the durable head.
+   */
   async getBalances(
     id: AccountId,
     options?: HistoricalOptions,
@@ -131,6 +189,13 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
     return this.#replay(id, revision);
   }
 
+  /**
+   * Commits entries and projection atomically, returning the original record for
+   * an identical store-wide event ID and rejecting different content under it.
+   * Conflicts rerun rules against fresh balances within maxAttempts. Concurrent
+   * same-ID calls may both run rules; winner lookup also handles rule rejection
+   * after an identical request has committed. Rule execution is not exactly once.
+   */
   async recordEvent(input: EventEnvelope<E>): Promise<LedgerRecord<E>> {
     const parsed = parse(envelopeSchema, clone(input));
     const envelope: StoredEnvelope = {
@@ -196,6 +261,11 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
     throw new LedgerError("CONCURRENCY", "Ledger commit retry limit exceeded");
   }
 
+  /**
+   * Streams validated records after an exclusive bound through an inclusive one.
+   * Defaults the upper bound to the durable head captured when iteration begins,
+   * excluding later commits. Validates history without rerunning accounting rules.
+   */
   async *readJournal(
     id: AccountId,
     range: JournalRange = {},
@@ -214,6 +284,11 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
     yield* this.#records(id, through, after);
   }
 
+  /**
+   * Rebuilds only the projection by folding stored entries, without rerunning
+   * rules or invariants. Retries if the durable head advances, up to maxAttempts.
+   * Use verify separately to detect rule drift or invariant violations.
+   */
   async rebuild(id: AccountId): Promise<Balances<B>> {
     accountId(id);
     for (let attempt = 0; attempt < this.#maxAttempts; attempt++) {
@@ -228,6 +303,11 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
     );
   }
 
+  /**
+   * Verifies a captured history by rerunning rules, checking each post-event
+   * invariant, and comparing the journal fold with its captured projection.
+   * Does not repair data; a missing projection requires rebuild first.
+   */
   async verify(id: AccountId): Promise<Verification<B>> {
     accountId(id);
     const captured = this.#head(await this.#store.load(id));
@@ -397,6 +477,10 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
   }
 }
 
+/**
+ * Composes a ledger without opening storage, defaulting to system time and eight
+ * attempts. Inject the clock for reproducible recorded timestamps.
+ */
 export function createLedger<
   const B extends BalanceDefinitions,
   const E extends EventCatalog,

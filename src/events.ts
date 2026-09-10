@@ -10,31 +10,61 @@ import {
 import { clone } from "./serialization.ts";
 import type { BalanceVector, StoredEntry, StoredEvent } from "./store.ts";
 
+/**
+ * Provides schema-erased operations for catalog lookup and historical replay.
+ */
 export interface RuntimeVersion {
+  /**
+   * Validates a detached payload while retaining its pre-transform representation.
+   */
   readonly construct: (payload: unknown) => unknown;
+  /**
+   * Checks a detached payload against the version's schema without running rules.
+   */
   readonly validate: (payload: unknown) => void;
+  /**
+   * Applies synchronous rules to parsed output and detached, validated balances.
+   */
   readonly run: (
     payload: unknown,
     balances: BalanceVector,
   ) => readonly StoredEntry[];
 }
 
+/**
+ * Retains the schema type so constructors infer input rather than parsed output.
+ */
 export type EventVersion<S extends z.ZodType> = RuntimeVersion &
   Readonly<{ schema: S }>;
+/**
+ * Binds validation and accounting rules into one durable version contract.
+ */
 export type VersionOptions<
   S extends z.ZodType,
   B extends BalanceDefinitions,
 > = Readonly<{
+  /**
+   * Accepts persisted z.input values and produces the z.output supplied to apply.
+   * Callbacks must remain synchronous and deterministic for replay.
+   */
   schema: S;
+  /**
+   * Defines the exact balance vector accepted by this version.
+   */
   balances: B;
+  /**
+   * Returns entries without side effects; may run again on conflicts or verify.
+   * Purity is the caller's responsibility, not a sandbox guarantee.
+   */
   apply: (payload: z.output<S>, current: Balances<B>) => readonly StoredEntry[];
 }>;
 
 /**
- * Declare immutable accounting semantics. Payloads persist as schema input; rules receive
- * parsed output, so deterministic transforms/defaults replay correctly. Schema callbacks and
- * apply must be synchronous and pure: no clock, randomness, I/O, or mutable external state.
- * Introduce a new version rather than changing a version already present in durable history.
+ * Declares accounting semantics that must not change once stored in history.
+ * Payloads persist as z.input; rules receive z.output, so deterministic transforms
+ * and defaults replay correctly. Schema callbacks and apply must be synchronous
+ * and pure: no clock, randomness, I/O, or mutable external state. Add a version
+ * instead of changing existing semantics; freezing cannot enforce callback purity.
  */
 export function eventVersion<
   S extends z.ZodType,
@@ -60,12 +90,22 @@ export function eventVersion<
   });
 }
 
+/**
+ * Maps v-prefixed positive safe-integer keys to durable accounting versions.
+ */
 export type VersionDefinitions = Readonly<
   Record<string, EventVersion<z.ZodType>>
 >;
+/**
+ * Groups versions under the event name later assigned by defineEvents.
+ */
 export type EventDefinition<V extends VersionDefinitions = VersionDefinitions> =
   Readonly<{ versions: V }>;
 
+/**
+ * Snapshots a nonempty version map after validating keys such as v1 and v2.
+ * Retain old versions while their events remain in durable history.
+ */
 export function event<const V extends VersionDefinitions>(
   versions: V,
 ): EventDefinition<V> {
@@ -88,6 +128,9 @@ export function event<const V extends VersionDefinitions>(
 }
 
 const catalog = Symbol("event catalog");
+/**
+ * Carries runtime version lookup alongside the catalog's typed constructors.
+ */
 export type EventCatalog = Readonly<{
   [catalog]: (type: string, version: number) => RuntimeVersion | undefined;
 }>;
@@ -104,8 +147,14 @@ type Constructors<D extends Readonly<Record<string, EventDefinition>>> = {
     >;
   };
 };
+/**
+ * Infers event names, versions, and schema-input constructors from definitions.
+ */
 export type DefinedEvents<D extends Readonly<Record<string, EventDefinition>>> =
   Constructors<D> & EventCatalog;
+/**
+ * Derives the stored event union, retaining z.input payloads for each version.
+ */
 export type EventsOf<E> = {
   [N in keyof E]: {
     [V in keyof E[N]]: E[N][V] extends (...args: never[]) => infer R
@@ -115,6 +164,11 @@ export type EventsOf<E> = {
 }[keyof E] &
   StoredEvent;
 
+/**
+ * Creates a nonempty frozen catalog of validated, typed event constructors.
+ * Constructors detach and validate payloads but retain their input representation;
+ * constructing an event neither runs accounting rules nor persists it.
+ */
 export function defineEvents<
   const D extends Readonly<Record<string, EventDefinition>>,
 >(definitions: D): DefinedEvents<D> {
@@ -156,6 +210,10 @@ export function defineEvents<
   ) as DefinedEvents<D>;
 }
 
+/**
+ * Resolves and validates a persisted event, throwing UNKNOWN_EVENT for a missing
+ * name or version and VALIDATION for schema rejection.
+ */
 export function resolveVersion(
   events: EventCatalog,
   value: StoredEvent,

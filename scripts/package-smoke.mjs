@@ -12,10 +12,10 @@ import {
   eventId,
   eventVersion,
   LedgerError,
-} from "typed-operational-ledger";
-import { MemoryLedgerStore } from "typed-operational-ledger/memory";
-import { PostgresLedgerStore } from "typed-operational-ledger/postgres";
-import { decode, encode } from "typed-operational-ledger/storage";
+} from "@tylerchambers/tally";
+import { MemoryLedgerStore } from "@tylerchambers/tally/memory";
+import { PostgresLedgerStore } from "@tylerchambers/tally/postgres";
+import { decode, encode } from "@tylerchambers/tally/storage";
 import { z } from "zod";
 
 const balances = defineBalances({

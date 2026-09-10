@@ -35,11 +35,20 @@ const rangeSchema = z.strictObject({
   through: z.bigint().nonnegative().optional(),
 });
 
-/** A process-local reference store. No durability across process termination. */
+/**
+ * Provides the LedgerStore reference implementation for tests and local use.
+ * Each instance owns isolated, process-local history with no persistence or
+ * external resources to dispose. Returned values are detached, not frozen;
+ * retain the instance for as long as its history is needed.
+ */
 export class MemoryLedgerStore implements LedgerStore {
   readonly #accounts = new Map<AccountId, Account>();
   readonly #events = new Map<EventId, JournalRecord>();
 
+  /**
+   * Returns a detached head, distinguishing an unknown account from a deleted
+   * projection without replaying history.
+   */
   async load(accountId: AccountId): Promise<Head> {
     parseAccountId(accountId);
     const account = this.#accounts.get(accountId);
@@ -48,12 +57,19 @@ export class MemoryLedgerStore implements LedgerStore {
       : { revision: 0n, balances: {} };
   }
 
+  /**
+   * Returns a detached record by globally scoped event ID, or null when absent.
+   */
   async findEvent(id: EventId): Promise<JournalRecord | null> {
     parseEventId(id);
     const existing = this.#events.get(id);
     return existing ? clone(existing) : null;
   }
 
+  /**
+   * Resolves identical retries before revision checks, then validates and
+   * publishes a new record and projection without suspending.
+   */
   async commit(
     accountId: AccountId,
     expectedRevision: bigint,
@@ -85,6 +101,10 @@ export class MemoryLedgerStore implements LedgerStore {
     return { status: "committed", record: clone(validated.record) };
   }
 
+  /**
+   * Yields detached records in the exclusive-inclusive range, capped at the
+   * head when iteration starts so later appends do not extend enumeration.
+   */
   async *journal(
     accountId: AccountId,
     range: JournalRange = {},
@@ -113,6 +133,11 @@ export class MemoryLedgerStore implements LedgerStore {
     }
   }
 
+  /**
+   * Verifies proposed totals against history before replacing the projection.
+   * Returns false on a stale revision and throws VALIDATION for a mismatched
+   * fold; permits extra zero balances without advancing the revision.
+   */
   async replaceProjection(
     accountId: AccountId,
     expectedRevision: bigint,
@@ -146,6 +171,10 @@ export class MemoryLedgerStore implements LedgerStore {
     return true;
   }
 
+  /**
+   * Administratively drops only the projection, requiring repair before new
+   * commits. Leaves unknown accounts absent and existing history intact.
+   */
   async deleteProjection(accountId: AccountId): Promise<void> {
     parseAccountId(accountId);
     const account = this.#accounts.get(accountId);

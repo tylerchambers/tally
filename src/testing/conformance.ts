@@ -10,11 +10,22 @@ import type {
   StoredEnvelope,
 } from "../store.ts";
 
+/**
+ * Couples a fresh, empty store with cleanup for resources owned by that case.
+ * Disposal must also release external clients or isolated database state.
+ */
 export type StoreConformanceFixture = {
   store: LedgerStore;
+  /**
+   * Releases the fixture after its case, including when assertions fail.
+   */
   dispose(): Promise<void>;
 };
 
+/**
+ * Creates an isolated fixture per case; shared prior history invalidates the
+ * suite's expectations. The factory owns cleanup if creation itself rejects.
+ */
 export type StoreConformanceFactory = () => Promise<StoreConformanceFixture>;
 
 function balances(total: bigint): BalanceVector {
@@ -117,7 +128,11 @@ function mutateRecord(record: JournalRecord): void {
   mutateObject(record.entries, "0", null);
 }
 
-/** Each case owns a fresh, empty store and always awaits its fixture's disposal. */
+/**
+ * Registers Bun tests for atomicity, retries, projections, and detached reads.
+ * Each case requests a fresh, empty store and awaits disposal in finally.
+ * Passing complements, but does not replace, adapter-specific database tests.
+ */
 export function storeConformance(
   name: string,
   factory: StoreConformanceFactory,

@@ -61,20 +61,42 @@ const rangeSchema = z.strictObject({
 });
 const pageSize = 128;
 
-/** PostgreSQL persistence. Construction neither migrates nor takes ownership of the client. */
+/**
+ * Persists ledger history and rebuildable projections in PostgreSQL.
+ * Run migrate() explicitly before use; construction performs no database I/O.
+ * The caller owns the supplied Drizzle database and underlying postgres.js
+ * client, including shutdown after in-flight operations finish.
+ *
+ * Adapter transactions enforce the LedgerStore contract. Schema constraints
+ * and triggers guard ordinary history mutations, not arbitrary raw-SQL inserts
+ * or privileged database administration; restrict direct write access.
+ */
 export class PostgresLedgerStore implements LedgerStore {
   constructor(private readonly database: PostgresJsDatabase) {}
 
+  /**
+   * Returns the indexed head without replaying history. A missing projection
+   * has null balances; an unknown account has revision zero and {}.
+   */
   async load(accountId: AccountId): Promise<Head> {
     parseAccountId(accountId);
     return this.readHead(this.database, accountId);
   }
 
+  /**
+   * Returns a decoded record by global event ID, checking its indexed identity
+   * against its content, or null when absent.
+   */
   async findEvent(id: EventId): Promise<JournalRecord | null> {
     parseEventId(id);
     return this.readEvent(this.database, id);
   }
 
+  /**
+   * Resolves event identity before revision checks inside one transaction.
+   * Captures input before suspension, then commits journal, entries, revision,
+   * and projection together. Identical retries return the original record.
+   */
   async commit(
     accountId: AccountId,
     expectedRevision: Revision,
@@ -137,6 +159,12 @@ export class PostgresLedgerStore implements LedgerStore {
     });
   }
 
+  /**
+   * Streams detached records in bounded, revision-ordered pages.
+   * Captures an inclusive upper revision when iteration starts and excludes the
+   * after bound. Append-only history keeps pages stable without a long-lived
+   * read transaction; writes after the captured head are not included.
+   */
   async *journal(
     accountId: AccountId,
     range: JournalRange = {},
@@ -170,6 +198,12 @@ export class PostgresLedgerStore implements LedgerStore {
     }
   }
 
+  /**
+   * Repairs the projection under the same account lock used by writers.
+   * Returns false on a stale revision; otherwise verifies totals against durable
+   * entry rows, allowing extra zero balances, before replacing the projection.
+   * Incorrect totals throw VALIDATION and never advance the durable revision.
+   */
   async replaceProjection(
     accountId: AccountId,
     expectedRevision: Revision,
@@ -239,6 +273,11 @@ export class PostgresLedgerStore implements LedgerStore {
     });
   }
 
+  /**
+   * Administratively deletes only the projection while serializing with commits
+   * and repairs. Preserves the durable revision and requires repair before new
+   * commits; does not perform caller authorization.
+   */
   async deleteProjection(accountId: AccountId): Promise<void> {
     parseAccountId(accountId);
     await this.database.transaction(async (transaction) => {

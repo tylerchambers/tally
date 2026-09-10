@@ -46,10 +46,13 @@ const initialMigration = [
     FOR EACH ROW EXECUTE FUNCTION typed_ledger.reject_history_mutation()`,
   `CREATE TRIGGER immutable_entries BEFORE UPDATE OR DELETE ON typed_ledger.entries
     FOR EACH ROW EXECUTE FUNCTION typed_ledger.reject_history_mutation()`,
+  // Row triggers do not fire for TRUNCATE, so history needs statement guards too.
   `CREATE TRIGGER immutable_journal_truncate BEFORE TRUNCATE ON typed_ledger.journal
     FOR EACH STATEMENT EXECUTE FUNCTION typed_ledger.reject_history_mutation()`,
   `CREATE TRIGGER immutable_entries_truncate BEFORE TRUNCATE ON typed_ledger.entries
     FOR EACH STATEMENT EXECUTE FUNCTION typed_ledger.reject_history_mutation()`,
+  // Entries belong to the event's inserting transaction, preventing later
+  // additions to old events. This does not validate a raw-SQL commit's full fold.
   `CREATE FUNCTION typed_ledger.require_entry_transaction() RETURNS trigger
     LANGUAGE plpgsql AS $$ BEGIN
       IF NOT EXISTS (
@@ -64,7 +67,15 @@ const initialMigration = [
     FOR EACH ROW EXECUTE FUNCTION typed_ledger.require_entry_transaction()`,
 ] as const;
 
-/** Apply the ledger schema explicitly. The caller owns database/client lifetime. */
+/**
+ * Applies the forward-only ledger schema explicitly in a serialized transaction.
+ * Repeated calls accept the recorded version only when its SQL checksum matches;
+ * incompatible migration history throws VALIDATION. There is no down migration.
+ *
+ * Checksums detect changes to recorded migration definitions, not live schema
+ * drift, data tampering, or disabled triggers. Use a migration-capable database
+ * role and retain ownership of the supplied database/client lifecycle.
+ */
 export async function migrate(database: PostgresJsDatabase): Promise<void> {
   const checksum = createHash("sha256")
     .update(initialMigration.join(";\n"))

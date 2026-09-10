@@ -24,7 +24,18 @@ const nodeSchema: z.ZodType<Encoded> = z.lazy(() =>
   ]),
 );
 
-/** Tagged tuples avoid collisions between user objects and codec markers. */
+/**
+ * Encodes data canonically so equal content has stable persistence and hashes.
+ * Tagged tuples prevent user objects from colliding with codec markers; sorted
+ * object keys remove insertion-order differences, while bigint, Date, and -0
+ * retain their value distinctions.
+ *
+ * Supports null, booleans, strings, finite numbers, bigint, valid dates, dense
+ * arrays, and plain objects with enumerable data properties. Throws VALIDATION
+ * for unsupported values, cycles, sparse arrays, unsupported properties, or
+ * nesting beyond depth 128. Undefined, functions, symbols, nonfinite numbers,
+ * invalid dates, and non-Date class instances are not persistable.
+ */
 export function encode(value: unknown): string {
   return JSON.stringify(toEncoded(value, new WeakSet(), 0));
 }
@@ -105,6 +116,11 @@ function toEncoded(
   }
 }
 
+/**
+ * Decodes canonical codec output, not arbitrary JSON.
+ * Throws VALIDATION for invalid or noncanonical text, including alternative
+ * key ordering or whitespace, so persisted representations stay unambiguous.
+ */
 export function decode(text: string): unknown {
   try {
     const parsed: unknown = JSON.parse(text);
@@ -153,11 +169,22 @@ function fromEncoded(node: Encoded): unknown {
   }
 }
 
+/**
+ * Returns a detached codec round-trip without freezing the result.
+ * Preserves encoded values, not object identity or null prototypes. Dates retain
+ * only timestamps and arrays only indexed values; rejected inputs throw VALIDATION.
+ */
 export function clone<T>(value: T): T {
-  // The codec preserves every supported value's runtime representation; unsupported values fail.
+  // The generic assertion is confined to the codec's supported value contract.
   return decode(encode(value)) as T;
 }
 
+/**
+ * Returns the canonical envelope's SHA-256 hex digest for idempotency.
+ * Includes IDs, event, metadata, and effectiveAt; excludes revision, entries,
+ * recordedAt, and projection totals so retries can reuse their original result.
+ * This is content identity, not an authenticity signature.
+ */
 export function fingerprint(envelope: StoredEnvelope): string {
   const content: StoredEnvelope = {
     id: envelope.id,
