@@ -1,0 +1,52 @@
+{
+  "name": "typed-operational-ledger",
+  "version": "0.1.0",
+  "description": "An embeddable, typed double-entry operational ledger",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "packageManager": "bun@1.4.2",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./memory": {
+      "types": "./dist/memory.d.ts",
+      "default": "./dist/memory.js"
+    },
+    "./storage": {
+      "types": "./dist/storage.d.ts",
+      "default": "./dist/storage.js"
+    },
+    "./postgres": {
+      "types": "./dist/postgres/index.d.ts",
+      "default": "./dist/postgres/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/conformance.d.ts",
+      "default": "./dist/testing/conformance.js"
+    }
+  },
+  "scripts": {
+    "check:runtime": "bun scripts/check-runtime.ts",
+    "format": "biome check --write .",
+    "lint": "biome check --error-on-warnings .",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test tests/core tests/memory",
+    "test:integration": "bun test tests/postgres",
+    "check": "bun run check:runtime && bun run lint && bun run typecheck && bun run test",
+    "build": "rm -rf ./dist && bun build ./src/index.ts ./src/memory.ts ./src/storage.ts ./src/postgres/index.ts ./src/testing/conformance.ts --target=node --packages=external --splitting --outdir=dist && tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "zod": "4.6.1",
+    "drizzle-orm": "0.45.2",
+    "postgres": "3.4.9"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.13",
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2"
+  }
+}
