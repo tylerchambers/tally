@@ -3,15 +3,19 @@ import { LedgerError } from "./errors.ts";
 import {
   type BalanceDefinitions,
   type Balances,
+  type CatalogEntry,
   nameSchema,
   parse,
   parseBalances,
 } from "./primitives.ts";
-import { clone } from "./serialization.ts";
+import { clone, encode } from "./serialization.ts";
 import type { BalanceVector, StoredEntry, StoredEvent } from "./store.ts";
 
+const versionBalances = Symbol("event version balances");
+const versionInvariant = Symbol("event version invariant");
+
 /**
- * Provides schema-erased operations for catalog lookup and historical replay.
+ * Provides schema-erased operations for catalog lookup and rule verification.
  */
 export interface RuntimeVersion {
   /**
@@ -34,8 +38,15 @@ export interface RuntimeVersion {
 /**
  * Retains the schema type so constructors infer input rather than parsed output.
  */
-export type EventVersion<S extends z.ZodType> = RuntimeVersion &
-  Readonly<{ schema: S }>;
+export type EventVersion<
+  S extends z.ZodType,
+  B extends BalanceDefinitions = BalanceDefinitions,
+> = RuntimeVersion &
+  Readonly<{
+    schema: S;
+    [versionBalances]: B;
+    [versionInvariant]: (balances: B) => B;
+  }>;
 /**
  * Binds validation and accounting rules into one durable version contract.
  */
@@ -53,10 +64,13 @@ export type VersionOptions<
    */
   balances: B;
   /**
-   * Returns entries without side effects; may run again on conflicts or verify.
-   * Purity is the caller's responsibility, not a sandbox guarantee.
+   * Returns catalog-owned, commodity-safe entries without side effects; may run
+   * again on conflicts or verify. Purity is the caller's responsibility.
    */
-  apply: (payload: z.output<S>, current: Balances<B>) => readonly StoredEntry[];
+  apply: (
+    payload: z.output<S>,
+    current: Balances<B>,
+  ) => readonly CatalogEntry<B>[];
 }>;
 
 /**
@@ -69,11 +83,13 @@ export type VersionOptions<
 export function eventVersion<
   S extends z.ZodType,
   const B extends BalanceDefinitions,
->(options: VersionOptions<S, B>): EventVersion<S> {
+>(options: VersionOptions<S, B>): EventVersion<S, B> {
   const { schema, apply } = options;
   const balances = clone(options.balances);
   return Object.freeze({
     schema,
+    [versionBalances]: balances,
+    [versionInvariant]: (value: B) => value,
     construct: (payload: unknown) => {
       const detached = clone(payload);
       parse(schema, detached);
@@ -93,9 +109,9 @@ export function eventVersion<
 /**
  * Maps v-prefixed positive safe-integer keys to durable accounting versions.
  */
-export type VersionDefinitions = Readonly<
-  Record<string, EventVersion<z.ZodType>>
->;
+type AnyEventVersion = RuntimeVersion &
+  Readonly<{ schema: z.ZodType; [versionBalances]: BalanceDefinitions }>;
+export type VersionDefinitions = Readonly<Record<string, AnyEventVersion>>;
 /**
  * Groups versions under the event name later assigned by defineEvents.
  */
@@ -128,11 +144,13 @@ export function event<const V extends VersionDefinitions>(
 }
 
 const catalog = Symbol("event catalog");
+const catalogBalances = Symbol("event catalog balances");
 /**
- * Carries runtime version lookup alongside the catalog's typed constructors.
+ * Carries runtime version lookup and balance identity alongside typed constructors.
  */
-export type EventCatalog = Readonly<{
+export type EventCatalog<B extends BalanceDefinitions> = Readonly<{
   [catalog]: (type: string, version: number) => RuntimeVersion | undefined;
+  [catalogBalances]: (balances: B) => B;
 }>;
 type NumberOf<V> = V extends `v${infer N extends number}` ? N : never;
 type Constructor<N extends string, V extends string, S extends z.ZodType> = (
@@ -150,8 +168,24 @@ type Constructors<D extends Readonly<Record<string, EventDefinition>>> = {
 /**
  * Infers event names, versions, and schema-input constructors from definitions.
  */
-export type DefinedEvents<D extends Readonly<Record<string, EventDefinition>>> =
-  Constructors<D> & EventCatalog;
+type VersionsOfDefinitions<
+  D extends Readonly<Record<string, EventDefinition>>,
+> = D[keyof D] extends infer Definition
+  ? Definition extends EventDefinition<infer V>
+    ? V[keyof V]
+    : never
+  : never;
+type RequireBalanceCatalog<
+  B extends BalanceDefinitions,
+  D extends Readonly<Record<string, EventDefinition>>,
+> =
+  Exclude<VersionsOfDefinitions<D>, EventVersion<z.ZodType, B>> extends never
+    ? unknown
+    : Readonly<{ __allEventVersionsMustUseBalances: B }>;
+export type DefinedEvents<
+  B extends BalanceDefinitions,
+  D extends Readonly<Record<string, EventDefinition>>,
+> = Constructors<D> & EventCatalog<B>;
 /**
  * Derives the stored event union, retaining z.input payloads for each version.
  */
@@ -170,18 +204,28 @@ export type EventsOf<E> = {
  * constructing an event neither runs accounting rules nor persists it.
  */
 export function defineEvents<
+  const B extends BalanceDefinitions,
   const D extends Readonly<Record<string, EventDefinition>>,
->(definitions: D): DefinedEvents<D> {
+>(
+  balances: B,
+  definitions: D & RequireBalanceCatalog<B, D>,
+): DefinedEvents<B, D> {
   const runtime = new Map<string, ReadonlyMap<number, RuntimeVersion>>();
   const constructors: Record<
     string,
     Readonly<Record<string, (payload: unknown) => StoredEvent>>
   > = {};
+  const encodedBalances = encode(balances);
   for (const [name, definition] of Object.entries(definitions)) {
     parse(nameSchema, name);
     const versions = new Map<number, RuntimeVersion>();
     const named: Record<string, (payload: unknown) => StoredEvent> = {};
     for (const [key, version] of Object.entries(definition.versions)) {
+      if (encode(version[versionBalances]) !== encodedBalances)
+        throw new LedgerError(
+          "VALIDATION",
+          "Every event version must use the catalog passed to defineEvents",
+        );
       const number = Number(key.slice(1));
       const snapshot = Object.freeze({
         construct: version.construct,
@@ -206,16 +250,17 @@ export function defineEvents<
     Object.assign(constructors, {
       [catalog]: (type: string, version: number) =>
         runtime.get(type)?.get(version),
+      [catalogBalances]: (value: B) => value,
     }),
-  ) as DefinedEvents<D>;
+  ) as DefinedEvents<B, D>;
 }
 
 /**
  * Resolves and validates a persisted event, throwing UNKNOWN_EVENT for a missing
  * name or version and VALIDATION for schema rejection.
  */
-export function resolveVersion(
-  events: EventCatalog,
+export function resolveVersion<B extends BalanceDefinitions>(
+  events: EventCatalog<B>,
   value: StoredEvent,
 ): RuntimeVersion {
   const version = events[catalog](value.type, value.version);

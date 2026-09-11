@@ -67,7 +67,7 @@ const balances = defineBalances({
   available: balance("USD"),
 });
 
-const events = defineEvents({
+const events = defineEvents(balances, {
   depositReceived: event({
     v1: eventVersion({
       balances,
@@ -147,13 +147,13 @@ On a revision conflict, the ledger reloads balances and reruns the rule and inva
 
 ### Versioned rules and invariants
 
-`eventVersion({ schema, balances, apply })` uses the schema to infer payload types and the balance definitions to infer `apply(input, current)`'s current-state argument. Callers use constructors such as `events.depositReceived.v1(payload)`; the persisted event contains `type`, numeric `version`, and `payload`.
+`defineEvents(balances, definitions)` binds every event version to one balance catalog; mixing versions built for another catalog fails at compile time and at runtime. `eventVersion({ schema, balances, apply })` uses the schema to infer payload types and the balance definitions to infer both `apply(input, current)`'s current-state argument and its permitted entries. A rule can return only entries between balances in that catalog with one shared commodity. `createLedger()` accepts the event catalog only with those same balance definitions. Callers use constructors such as `events.depositReceived.v1(payload)`; the persisted event contains `type`, numeric `version`, and `payload`.
 
 The payload is stored as validated **schema input**. Rules receive parsed **schema output**, so a deterministic Zod transform can convert an input string to a `bigint` and repeat that conversion during verification. Different inputs remain different facts even if they transform to the same output.
 
 Rules, schema callbacks/defaults, and invariants must be synchronous and deterministic. They must not perform I/O or depend on the current clock, randomness, metadata, or mutable external state. Retries and verification can execute them more than once. The library isolates supplied data; it cannot sandbox a callback's external dependencies.
 
-Once a version is committed, retain its schema and rule unchanged and introduce a new version for different treatment. Keep the balance catalog compatible with stored history. Invariants must return `true` to accept the proposed state; `false` or a thrown exception aborts the write. Verification also evaluates the **currently configured** invariants, so changing them can reject old states even when their original rules have not changed.
+Once a version is committed, retain its schema and rule unchanged while it must remain available to typed journal readers or verification, and introduce a new version for different treatment. Balance replay and projection rebuilding use persisted entries and do not require the historical rule. Keep the balance catalog compatible with stored history. Invariants must return `true` to accept the proposed state; `false` or a thrown exception aborts the write. Verification also evaluates the **currently configured** invariants, so changing them can reject old states even when their original rules have not changed.
 
 For a correction, define and record a new event whose rule makes the compensating entries. There is no history-editing API.
 
@@ -229,7 +229,7 @@ The adapter commits journal records, entry rows, revision, and projection in one
 
 The journal is authoritative; the current-balance projection is disposable. `ledger.rebuild(account)` repairs a missing or semantically incorrect projection using revision-checked replacement. If the stored projection cannot even be decoded or validated, explicitly call `store.deleteProjection(account)` before rebuilding. Deletion is administrative: until repair finishes, current reads and new writes fail with `PROJECTION_MISSING`. It never deletes history or resets the durable revision.
 
-Rebuilding folds stored entries without executing accounting rules. It still validates journal records and requires their event versions to be available. Use `verify()` afterward to check that the retained rules still explain those entries. Do not use a rebuild to conceal corrupt history or rule drift.
+Rebuilding folds stored entries without resolving or executing accounting rules, so retired event versions do not prevent projection recovery. It still validates journal structure, entries, fingerprints, account identity, and contiguous revisions. Use `verify()` with the complete historical catalog to check that retained rules still explain those entries. Do not use a rebuild to conceal corrupt history or rule drift.
 
 ## Writing a storage adapter
 

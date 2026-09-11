@@ -43,7 +43,7 @@ async function collect<T>(values: AsyncIterable<T>): Promise<T[]> {
 }
 
 function setup(store = new MemoryLedgerStore()) {
-  const events = defineEvents({
+  const events = defineEvents(balances, {
     deposit: event({
       v1: eventVersion({
         schema: quantity,
@@ -166,7 +166,7 @@ describe("ledger", () => {
 
   it("returns a same-ID winner that commits between lookup and state-sensitive rule execution", async () => {
     const store = new FaultStore();
-    const events = defineEvents({
+    const events = defineEvents(balances, {
       once: event({
         v1: eventVersion({
           schema: z.strictObject({}),
@@ -234,7 +234,7 @@ describe("ledger", () => {
   it("returns the original commit before a now-inapplicable rule or invariant can run", async () => {
     const store = new MemoryLedgerStore();
     let accepted = true;
-    const events = defineEvents({
+    const events = defineEvents(balances, {
       once: event({
         v1: eventVersion({
           schema: z.strictObject({}),
@@ -328,6 +328,41 @@ describe("ledger", () => {
     expect(await failingStore.findEvent(eventId("conflicting"))).toBeNull();
   });
 
+  it("replays recorded entries without requiring their event versions", async () => {
+    const { ledger, events, store } = setup();
+    await ledger.recordEvent({
+      id: eventId("retired-version"),
+      accountId: account,
+      event: events.deposit.v1({ quantity: amount(USD, 10n) }),
+    });
+    const replacementEvents = defineEvents(balances, {
+      replacement: event({
+        v1: eventVersion({
+          schema: quantity,
+          balances,
+          apply: (payload) => [
+            entry(balances.external, balances.available, payload.quantity),
+          ],
+        }),
+      }),
+    });
+    const replacement = createLedger({
+      balances,
+      events: replacementEvents,
+      store,
+    });
+
+    expect(
+      (await replacement.getBalances(account, { at: { revision: 1n } }))
+        .available.atomic,
+    ).toBe(10n);
+    await store.deleteProjection(account);
+    expect((await replacement.rebuild(account)).available.atomic).toBe(10n);
+    await expect(replacement.verify(account)).rejects.toMatchObject({
+      code: "UNKNOWN_EVENT",
+    });
+  });
+
   it("rebuilds recorded entries without rerunning changed rules, while verify detects rule drift", async () => {
     const { ledger, events, store } = setup();
     await ledger.recordEvent({
@@ -335,7 +370,7 @@ describe("ledger", () => {
       accountId: account,
       event: events.deposit.v1({ quantity: amount(USD, 10n) }),
     });
-    const changedEvents = defineEvents({
+    const changedEvents = defineEvents(balances, {
       deposit: event({
         v1: eventVersion({
           schema: quantity,
@@ -397,7 +432,7 @@ describe("ledger", () => {
     });
   });
 
-  it("rejects revision gaps, duplicated events, foreign accounts, unknown versions, and malformed entries", async () => {
+  it("rejects revision gaps, duplicated events, foreign accounts, and malformed entries", async () => {
     const store = new FaultStore();
     const { ledger, events } = setup(store);
     await ledger.recordEvent({
@@ -422,13 +457,7 @@ describe("ledger", () => {
         },
         code: "CORRUPT_HISTORY",
       },
-      {
-        transform: (record) => {
-          const unknown = { ...record, event: { ...record.event, version: 9 } };
-          return [{ ...unknown, fingerprint: fingerprint(unknown) }];
-        },
-        code: "UNKNOWN_EVENT",
-      },
+
       {
         transform: (record) => [
           {
@@ -451,6 +480,30 @@ describe("ledger", () => {
         code: scenario.code,
       });
     }
+  });
+
+  it("classifies invalid persisted payloads as corrupt history", async () => {
+    const store = new FaultStore();
+    const { ledger, events } = setup(store);
+    await ledger.recordEvent({
+      id: eventId("invalid-persisted-payload"),
+      accountId: account,
+      event: events.deposit.v1({ quantity: amount(USD, 1n) }),
+    });
+    store.transform = (record) => {
+      const invalid = {
+        ...record,
+        event: { ...record.event, payload: { quantity: "not-an-amount" } },
+      };
+      return [{ ...invalid, fingerprint: fingerprint(invalid) }];
+    };
+
+    await expect(collect(ledger.readJournal(account))).rejects.toMatchObject({
+      code: "CORRUPT_HISTORY",
+    });
+    await expect(ledger.verify(account)).rejects.toMatchObject({
+      code: "CORRUPT_HISTORY",
+    });
   });
 
   it("detaches envelopes, returned dates, metadata, and journal records", async () => {
@@ -485,7 +538,7 @@ describe("ledger", () => {
         .regex(/^[0-9]+$/u)
         .transform(BigInt),
     });
-    const events = defineEvents({
+    const events = defineEvents(balances, {
       imported: event({
         v1: eventVersion({
           schema,
@@ -516,7 +569,7 @@ describe("ledger", () => {
   });
 
   it("isolates caller and rule mutations from persisted schema input", async () => {
-    const events = defineEvents({
+    const events = defineEvents(balances, {
       tagged: event({
         v1: eventVersion({
           schema: z.strictObject({ tags: z.array(z.string()) }),
@@ -568,7 +621,7 @@ describe("ledger", () => {
     });
     const versions = { v1: original };
     const definitions = { deposit: event(versions) };
-    const events = defineEvents(definitions);
+    const events = defineEvents(balances, definitions);
     versions.v1 = changed;
     definitions.deposit = event({ v1: changed });
     const ledger = createLedger({
@@ -584,19 +637,57 @@ describe("ledger", () => {
     expect((await ledger.verify(account)).balances.available.atomic).toBe(3n);
   });
 
-  it("rejects rule entries referencing unconfigured balances without writing a record", async () => {
-    const events = defineEvents({
-      invalid: event({
+  it("rejects event versions from a different balance catalog", () => {
+    const otherBalances = defineBalances({
+      source: balance(USD),
+      destination: balance(USD),
+    });
+    const mixed = {
+      valid: event({
         v1: eventVersion({
           schema: z.strictObject({}),
           balances,
           apply: () => [
+            entry(balances.external, balances.available, amount(USD, 1n)),
+          ],
+        }),
+      }),
+      invalid: event({
+        v2: eventVersion({
+          schema: z.strictObject({}),
+          balances: otherBalances,
+          apply: () => [
             entry(
-              balances.external,
-              { name: "unconfigured", commodity: USD },
+              otherBalances.source,
+              otherBalances.destination,
               amount(USD, 1n),
             ),
           ],
+        }),
+      }),
+    };
+
+    expect(() => defineEvents(balances, mixed as never)).toThrow(
+      "Every event version must use the catalog passed to defineEvents",
+    );
+  });
+
+  it("rejects rule entries referencing unconfigured balances without writing a record", async () => {
+    const events = defineEvents(balances, {
+      invalid: event({
+        v1: eventVersion({
+          schema: z.strictObject({}),
+          balances,
+          // Deliberately cross the TypeScript boundary to exercise validation for
+          // JavaScript callers and corrupted adapter values.
+          apply: () =>
+            [
+              entry(
+                balances.external,
+                { name: "unconfigured", commodity: USD },
+                amount(USD, 1n),
+              ),
+            ] as never,
         }),
       }),
     });

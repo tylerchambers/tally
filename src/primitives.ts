@@ -103,6 +103,23 @@ export type Entry<C extends string = string> = Readonly<{
  */
 export type BalanceDefinitions = Readonly<Record<string, Balance>>;
 /**
+ * Derives every valid posting from a balance catalog, retaining exact bucket names
+ * and excluding pairs whose commodities differ.
+ */
+export type CatalogEntry<B extends BalanceDefinitions> = {
+  readonly [D in keyof B]: {
+    readonly [C in keyof B]: B[C]["commodity"] extends B[D]["commodity"]
+      ? B[D]["commodity"] extends B[C]["commodity"]
+        ? Readonly<{
+            debit: B[D];
+            credit: B[C];
+            amount: Amount<B[D]["commodity"]>;
+          }>
+        : never
+      : never;
+  }[keyof B];
+}[keyof B];
+/**
  * Derives every bucket's amount type from its catalog commodity.
  */
 export type Balances<B extends BalanceDefinitions> = {
@@ -170,13 +187,17 @@ export function defineBalances<
  * Creates a positive transfer, rejecting equal bucket names or mismatched units
  * at runtime as well as preserving commodity constraints in TypeScript.
  */
-export function entry<const C extends string>(
-  debit: Balance<C>,
-  credit: Balance<NoInfer<C>>,
-  quantity: Amount<NoInfer<C>>,
-): Entry<C> {
+export function entry<const D extends Balance, const C extends Balance>(
+  debit: D,
+  credit: C,
+  quantity: Amount<NoInfer<D["commodity"]>> & Amount<NoInfer<C["commodity"]>>,
+): Readonly<{ debit: D; credit: C; amount: Amount<D["commodity"]> }> {
   // Runtime validation proves every component matches the debit's inferred commodity.
-  return parseEntry({ debit, credit, amount: quantity }) as Entry<C>;
+  return parseEntry({ debit, credit, amount: quantity }) as Readonly<{
+    debit: D;
+    credit: C;
+    amount: Amount<D["commodity"]>;
+  }>;
 }
 
 /**

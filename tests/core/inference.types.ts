@@ -32,7 +32,7 @@ export async function inferenceContract(): Promise<void> {
     issued: balance(TOKEN),
     token: balance(TOKEN),
   });
-  const events = defineEvents({
+  const events = defineEvents(balances, {
     deposit: event({
       v1: eventVersion({
         schema: z.strictObject({ quantity: amountSchema(USD) }),
@@ -40,16 +40,17 @@ export async function inferenceContract(): Promise<void> {
         apply: (payload, current) => {
           const dollars: Amount<"USD"> = current.cash;
           const tokens: Amount<"TOKEN"> = current.token;
-          const posting: Entry<"USD"> = entry(
+          const posting = entry(
             balances.external,
             balances.cash,
             payload.quantity,
           );
+          const typedPosting: Entry<"USD"> = posting;
           // @ts-expect-error A dollar balance is not a token balance.
           const wrong: Amount<"TOKEN"> = dollars;
           // @ts-expect-error Current vector contains only the configured named balances.
           current.missing;
-          void [tokens, wrong];
+          void [tokens, typedPosting, wrong];
           return [posting];
         },
       }),
@@ -70,6 +71,32 @@ export async function inferenceContract(): Promise<void> {
         ],
       }),
     }),
+  });
+  const unsafeEntries = [
+    {
+      debit: balances.external,
+      credit: balances.token,
+      amount: amount(USD, 1n),
+    },
+  ] as const;
+  eventVersion({
+    schema: z.strictObject({}),
+    balances,
+    // @ts-expect-error Rules may return only commodity-safe entries from this catalog.
+    apply: () => unsafeEntries,
+  });
+  const unknownBalanceEntries = [
+    {
+      debit: balances.external,
+      credit: { name: "unconfigured", commodity: USD },
+      amount: amount(USD, 1n),
+    },
+  ] as const;
+  eventVersion({
+    schema: z.strictObject({}),
+    balances,
+    // @ts-expect-error Rules may reference only balances in their declared catalog.
+    apply: () => unknownBalanceEntries,
   });
   const ledger = createLedger({
     balances,
@@ -104,6 +131,34 @@ export async function inferenceContract(): Promise<void> {
     store: new MemoryLedgerStore(),
     // @ts-expect-error Invariants must return an explicit acceptance decision.
     invariants: [() => {}],
+  });
+  const otherBalances = defineBalances({
+    source: balance(USD),
+    destination: balance(USD),
+  });
+  const otherVersion = eventVersion({
+    schema: z.strictObject({}),
+    balances: otherBalances,
+    apply: () => [
+      entry(otherBalances.source, otherBalances.destination, amount(USD, 1n)),
+    ],
+  });
+  // @ts-expect-error One event catalog cannot mix different balance catalogs.
+  defineEvents(balances, {
+    valid: event({
+      v1: eventVersion({
+        schema: z.strictObject({}),
+        balances,
+        apply: () => [entry(balances.external, balances.cash, amount(USD, 1n))],
+      }),
+    }),
+    invalid: event({ v2: otherVersion }),
+  });
+  createLedger({
+    balances: otherBalances,
+    // @ts-expect-error Event catalogs belong to the balance catalog they were defined with.
+    events,
+    store: new MemoryLedgerStore(),
   });
   const committed = await ledger.recordEvent({
     id: key,

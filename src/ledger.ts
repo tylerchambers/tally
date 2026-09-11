@@ -33,19 +33,13 @@ import type {
  * Couples a catalog-typed event with its account and store-wide idempotency key.
  * Effective time and metadata are part of the request's identity.
  */
-export type EventEnvelope<E extends EventCatalog> = Omit<
-  StoredEnvelope,
-  "event"
-> &
+export type EventEnvelope<E> = Omit<StoredEnvelope, "event"> &
   Readonly<{ event: EventsOf<E> }>;
 /**
  * Represents a committed event with its durable entries and account revision.
  * Payloads retain schema-input form rather than rule-output form.
  */
-export type LedgerRecord<E extends EventCatalog> = Omit<
-  JournalRecord,
-  "event"
-> &
+export type LedgerRecord<E> = Omit<JournalRecord, "event"> &
   Readonly<{ event: EventsOf<E> }>;
 /**
  * Accepts a candidate vector only by returning true; false or a thrown error
@@ -59,7 +53,7 @@ export type Invariant<B extends BalanceDefinitions> = (
  */
 export type LedgerOptions<
   B extends BalanceDefinitions,
-  E extends EventCatalog,
+  E extends EventCatalog<B>,
 > = Readonly<{
   /**
    * Defines the exact buckets and commodities shared by every account.
@@ -106,7 +100,7 @@ export type Verification<B extends BalanceDefinitions> = Readonly<{
 }>;
 type Dependencies<
   B extends BalanceDefinitions,
-  E extends EventCatalog,
+  E extends EventCatalog<B>,
 > = LedgerOptions<B, E> & Readonly<{ clock: () => Date; maxAttempts: number }>;
 
 const revisionSchema = z.bigint().nonnegative();
@@ -124,10 +118,11 @@ const envelopeSchema = z.strictObject({
 
 /**
  * Coordinates typed accounting policy with an explicitly supplied store.
- * Reuse with stable catalogs and pure rules; keep historical versions available.
+ * Reuse with stable catalogs and pure rules. Historical versions are required for
+ * typed journal reads and verification, but not balance replay or rebuilding.
  * The caller owns store startup and disposal. Use createLedger for defaults.
  */
-export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
+export class Ledger<B extends BalanceDefinitions, E extends EventCatalog<B>> {
   readonly #balances: B;
   readonly #events: E;
   readonly #store: LedgerStore;
@@ -281,7 +276,10 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
       );
     if (after > through)
       throw new LedgerError("VALIDATION", "Journal range is reversed");
-    yield* this.#records(id, through, after);
+    for await (const record of this.#records(id, through, after)) {
+      this.#version(record);
+      yield record as LedgerRecord<E>;
+    }
   }
 
   /**
@@ -315,7 +313,7 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
       id,
       captured.revision,
       (record, previous, next) => {
-        const version = resolveVersion(this.#events, record.event);
+        const version = this.#version(record);
         const expected = this.#entries(
           version.run(record.event.payload, previous),
         );
@@ -403,17 +401,22 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
   }
 
   #record(value: JournalRecord): LedgerRecord<E> {
+    const record = this.#storedRecord(value);
+    this.#version(record);
+    // Catalog lookup and the matching version's schema establish the event union.
+    return record as LedgerRecord<E>;
+  }
+
+  #storedRecord(value: JournalRecord): JournalRecord {
     try {
       const record = parseRecord(value);
-      resolveVersion(this.#events, record.event);
       this.#entries(record.entries);
       if (fingerprint(record) !== record.fingerprint)
         throw new LedgerError(
           "CORRUPT_HISTORY",
           "Journal fingerprint does not match its envelope",
         );
-      // Catalog lookup and the matching version's schema establish the event union.
-      return clone(record) as LedgerRecord<E>;
+      return clone(record);
     } catch (cause) {
       if (cause instanceof LedgerError && cause.code === "VALIDATION")
         throw new LedgerError(
@@ -425,15 +428,29 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
     }
   }
 
+  #version(record: JournalRecord) {
+    try {
+      return resolveVersion(this.#events, record.event);
+    } catch (cause) {
+      if (cause instanceof LedgerError && cause.code === "VALIDATION")
+        throw new LedgerError(
+          "CORRUPT_HISTORY",
+          "Persisted event payload does not match its version schema",
+          { cause },
+        );
+      throw cause;
+    }
+  }
+
   async *#records(
     id: AccountId,
     through: bigint,
     after = 0n,
-  ): AsyncIterable<LedgerRecord<E>> {
+  ): AsyncIterable<JournalRecord> {
     let expected = after + 1n;
     const seen = new Set<string>();
     for await (const value of this.#store.journal(id, { after, through })) {
-      const record = this.#record(value);
+      const record = this.#storedRecord(value);
       if (
         record.accountId !== id ||
         record.revision !== expected ||
@@ -459,7 +476,7 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
     id: AccountId,
     through: bigint,
     visit?: (
-      record: LedgerRecord<E>,
+      record: JournalRecord,
       previous: Balances<B>,
       next: Balances<B>,
     ) => void,
@@ -483,7 +500,7 @@ export class Ledger<B extends BalanceDefinitions, E extends EventCatalog> {
  */
 export function createLedger<
   const B extends BalanceDefinitions,
-  const E extends EventCatalog,
+  const E extends EventCatalog<B>,
 >(options: LedgerOptions<B, E>): Ledger<B, E> {
   return new Ledger({
     ...options,

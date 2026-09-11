@@ -39,7 +39,7 @@ const cashPayload = z.strictObject({ quantity: amountSchema(USD) });
 // Rules translate business facts into balanced movements. entry(from, to, amount)
 // subtracts from the first balance and adds to the second. `v1` identifies the
 // rule version, not the event's position in the journal.
-const events = defineEvents({
+const events = defineEvents(balances, {
   deposit: event({
     v1: eventVersion({
       schema: cashPayload,

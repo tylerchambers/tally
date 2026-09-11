@@ -22,7 +22,7 @@ const balances = defineBalances({
   clearing: balance("USD"),
   available: balance("USD"),
 });
-const events = defineEvents({
+const events = defineEvents(balances, {
   deposit: event({
     v1: eventVersion({
       balances,
